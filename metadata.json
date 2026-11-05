@@ -1,0 +1,6 @@
+{
+  "name": "Algoritmia - Tutor de Java por Voz",
+  "description": "Tutor de programação por voz em tempo real especializado em Java, estruturas de dados, algoritmos e complexidade computacional com Gemini 3.8 Live.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
