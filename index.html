@@ -3,6 +3,42 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        try {
+          var origFetch = window.fetch;
+          if (origFetch) {
+            var _currentFetch = function () {
+              return origFetch.apply(window, arguments);
+            };
+            Object.defineProperty(window, 'fetch', {
+              configurable: true,
+              enumerable: true,
+              get: function () {
+                return _currentFetch;
+              },
+              set: function (fn) {
+                _currentFetch = fn;
+              },
+            });
+            if (typeof Window !== 'undefined' && Window.prototype) {
+              try {
+                Object.defineProperty(Window.prototype, 'fetch', {
+                  configurable: true,
+                  enumerable: true,
+                  get: function () {
+                    return _currentFetch;
+                  },
+                  set: function (fn) {
+                    _currentFetch = fn;
+                  },
+                });
+              } catch (_) {}
+            }
+          }
+        } catch (_) {}
+      })();
+    </script>
     <title>Algoritmia - Tutor de Java por Voz</title>
     <meta name="description" content="Tutor de programação por voz em tempo real especializado em Java, estruturas de dados, algoritmos e complexidade computacional com Gemini 3.8 Live." />
     <meta property="og:title" content="Algoritmia - Tutor de Java por Voz" />
