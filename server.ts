@@ -6,10 +6,10 @@ import { WebSocketServer, WebSocket } from 'ws';
 import dotenv from 'dotenv';
 import {
   GoogleGenAI,
-  LiveServerMessage,
-  Modality,
   Type,
-  FunctionDeclaration,
+  Modality,
+  type LiveServerMessage,
+  type FunctionDeclaration,
 } from '@google/genai';
 
 dotenv.config();
@@ -19,7 +19,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = http.createServer(app);
-const port = 3000;
+const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
 
@@ -91,6 +91,30 @@ const displayCodeSnippetTool: FunctionDeclaration = {
   },
 };
 
+// Tool to track student progress and SRS
+const recordProgressTool: FunctionDeclaration = {
+  name: "recordProgress",
+  description: "Registra o progresso do aluno quando ele acerta ou erra um conceito ou quando um tópico de Java é praticado. Use sempre que notar um acerto claro ou um ponto cego/erro do aluno.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      topic: {
+        type: Type.STRING,
+        description: "Tópico exato: arrays, listas, pilhas, filas, hash maps, árvores, grafos, recursão, ordenação, busca, ou programação dinâmica",
+      },
+      result: {
+        type: Type.STRING,
+        description: "Resultado: 'acerto' se o aluno compreendeu ou resolveu bem, ou 'erro' se cometeu um equívoco ou teve dificuldade relevante.",
+      },
+      observation: {
+        type: Type.STRING,
+        description: "Observação concisa (1 frase) sobre o acerto ou ponto a revisar.",
+      },
+    },
+    required: ["topic", "result", "observation"],
+  },
+};
+
 // WebSocket server for live voice bridging
 const wss = new WebSocketServer({ noServer: true });
 
@@ -98,11 +122,57 @@ wss.on('connection', async (clientWs: WebSocket, request) => {
   let session: any = null;
   const url = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);
   const requestedVoice = url.searchParams.get('voice') || 'Zephyr';
-  const learningMode = url.searchParams.get('mode') || 'explanatory'; // 'explanatory' | 'socratic'
+  const learningMode = url.searchParams.get('mode') || 'explanatory'; // 'explanatory' | 'socratic' | 'review' | 'interview' | 'debug'
+  const studentLevel = url.searchParams.get('level') || 'iniciante'; // 'iniciante' | 'intermediário' | 'avançado'
 
   let dynamicInstruction = BASE_SYSTEM_INSTRUCTION;
+
+  // Append Level Guidance
+  if (studentLevel === 'iniciante') {
+    dynamicInstruction += `\n\n[NÍVEL DO ALUNO: INICIANTE]
+- Use mais analogias intuitivas do cotidiano e divida em passos bem pequenos e fáceis.
+- Evite jargões complexos sem explicar imediatamente de forma calorosa.
+- Seja muito paciente, encorajador e acolha dúvidas básicas com naturalidade.`;
+  } else if (studentLevel === 'intermediário') {
+    dynamicInstruction += `\n\n[NÍVEL DO ALUNO: INTERMEDIÁRIO]
+- Equilibre intuição e rigor técnico formal.
+- Conecte sempre com a biblioteca padrão Java (java.util), estruturas de dados internas e classes concretas vs interfaces.
+- Exija raciocínio sobre complexidade de tempo e espaço nas escolhas.`;
+  } else if (studentLevel === 'avançado') {
+    dynamicInstruction += `\n\n[NÍVEL DO ALUNO: AVANÇADO]
+- Foque intensamente em complexidade assintótica exata, trade-offs de implementação e casos de borda extremos.
+- Discuta implicações de JVM (overhead de ponteiros, cache locality de arrays contíguos vs nós encadeados, unboxing, concorrência).
+- Desafie o aluno com otimizações não triviais.`;
+  }
+
+  // Append Mode Guidance
   if (learningMode === 'socratic') {
-    dynamicInstruction += `\n\nATENÇÃO: O aluno selecionou o MODO SOCRÁTICO. Não dê respostas prontas nem códigos inteiros de início. Faça perguntas guiadas para ele raciocinar sozinho.`;
+    dynamicInstruction += `\n\n[MODO: SOCRÁTICO]
+- Não dê respostas prontas nem códigos inteiros de início.
+- Faça perguntas guiadas e reflexivas para o aluno raciocinar e chegar à conclusão sozinho.`;
+  } else if (learningMode === 'review') {
+    dynamicInstruction += `\n\n[MODO: REVISÃO DE CÓDIGO (CODE REVIEW)]
+- O aluno enviará ou editará código Java (via editor, upload de arquivo ou foto).
+- Seu papel é analisar o código e apontar EXATAMENTE os 2 a 3 principais problemas de complexidade assintótica e legibilidade/boas práticas.
+- NUNCA reescreva o código pronto para o aluno neste modo.
+- Termine sua intervenção propondo um desafio claro e específico para o próprio aluno reescrever e otimizar o trecho.`;
+  } else if (learningMode === 'interview') {
+    dynamicInstruction += `\n\n[MODO: SIMULADO DE ENTREVISTA TÉCNICA]
+- Há um cronômetro de 15 minutos visível na tela do aluno.
+- No início, proponha um problema clássico e claro de algoritmo ou estrutura de dados em Java (adequado ao nível do aluno).
+- Durante o tempo de prova (15 min), responda EXCLUSIVAMENTE a dúvidas de interpretação de enunciado e restrições. NÃO dê dicas da solução nem valide se o algoritmo está certo antes da entrega.
+- Ao final do tempo ou quando o aluno disser que terminou, faça uma avaliação estruturada completa com nota de 0 a 100 cobrindo 4 pilares:
+  1) Corretude do algoritmo;
+  2) Complexidade de tempo e espaço;
+  3) Clareza e legibilidade do código Java;
+  4) Comunicação e explicação do raciocínio.
+- Aponte os pontos fortes e os 2 principais pontos de melhoria com gentileza profissional.`;
+  } else if (learningMode === 'debug') {
+    dynamicInstruction += `\n\n[MODO: DEBUG & STACK TRACE]
+- O aluno descreverá um erro, exceção (NullPointerException, ArrayIndexOutOfBoundsException, StackOverflowError, etc.) ou colará um stack trace.
+- NÃO entregue a correção ou a linha corrigida de imediato.
+- Faça perguntas diagnósticas cirúrgicas (ex: "Qual é o valor dessa variável quando o array está vazio?", "Em que momento esse ponteiro pode ser nulo?").
+- Guie o aluno passo a passo para que ele próprio localize e compreenda a causa raiz.`;
   }
 
   try {
@@ -119,7 +189,7 @@ wss.on('connection', async (clientWs: WebSocket, request) => {
         },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        tools: [{ functionDeclarations: [displayCodeSnippetTool] }],
+        tools: [{ functionDeclarations: [displayCodeSnippetTool, recordProgressTool] }],
         systemInstruction: dynamicInstruction,
       },
       callbacks: {
@@ -180,7 +250,7 @@ wss.on('connection', async (clientWs: WebSocket, request) => {
               );
             }
 
-            // Tool calls handling (interactive code display)
+            // Tool calls handling
             if (message.toolCall?.functionCalls) {
               const responses = [];
               for (const call of message.toolCall.functionCalls) {
@@ -205,6 +275,24 @@ wss.on('connection', async (clientWs: WebSocket, request) => {
                     id: call.id,
                     name: call.name,
                     response: { result: 'Código exibido com sucesso na lousa do aluno.' },
+                  });
+                } else if (call.name === 'recordProgress') {
+                  const args = call.args as any;
+                  clientWs.send(
+                    JSON.stringify({
+                      type: 'progressUpdate',
+                      progress: {
+                        topic: args.topic,
+                        result: args.result,
+                        observation: args.observation,
+                        timestamp: Date.now(),
+                      },
+                    })
+                  );
+                  responses.push({
+                    id: call.id,
+                    name: call.name,
+                    response: { result: 'Progresso registrado com sucesso no painel do aluno.' },
                   });
                 }
               }
@@ -239,6 +327,7 @@ wss.on('connection', async (clientWs: WebSocket, request) => {
         type: 'sessionReady',
         voice: requestedVoice,
         mode: learningMode,
+        level: studentLevel,
       })
     );
   } catch (err: any) {
@@ -266,6 +355,16 @@ wss.on('connection', async (clientWs: WebSocket, request) => {
         session.sendRealtimeInput({
           text: data.text,
         });
+      } else if (data.type === 'image' && data.image && session) {
+        // JPEG base64 frame from camera or file
+        session.sendRealtimeInput({
+          video: { data: data.image, mimeType: data.mimeType || 'image/jpeg' },
+        });
+        if (data.prompt) {
+          session.sendRealtimeInput({
+            text: data.prompt,
+          });
+        }
       }
     } catch (e) {
       console.error('Error processing client message:', e);
@@ -326,6 +425,44 @@ app.post('/api/ask-tutor-text', async (req, res) => {
   } catch (err: any) {
     console.error('Error in ask-tutor-text:', err);
     res.status(500).json({ error: err?.message || 'Falha ao processar resposta do tutor' });
+  }
+});
+
+// REST Endpoint to generate a 3 to 5 questions quiz based on session concepts
+app.post('/api/generate-quiz', async (req, res) => {
+  try {
+    const { transcript, topics, level } = req.body;
+    const prompt = `Você é um tutor especialista em Java. Crie de 3 a 5 perguntas objetivas de múltipla escolha para checar a compreensão do aluno sobre os conceitos discutidos.
+Nível do aluno: ${level || 'iniciante'}.
+Tópicos abordados: ${Array.isArray(topics) ? topics.join(', ') : topics || 'algoritmos e estruturas de dados em Java'}.
+Resumo/transcrição da sessão:
+${transcript ? transcript.slice(0, 3000) : 'Discussão geral de coleções e complexidade em Java.'}
+
+Gere um array JSON estritamente válido de objetos no formato:
+[
+  {
+    "id": 1,
+    "topic": "um de: arrays, listas, pilhas, filas, hash maps, árvores, grafos, recursão, ordenação, busca, ou programação dinâmica",
+    "question": "Pergunta direta e clara em português do Brasil",
+    "options": ["Alternativa A", "Alternativa B", "Alternativa C", "Alternativa D"],
+    "correctAnswerIndex": 0,
+    "explanation": "Explicação amigável de por que essa alternativa está correta e por que as outras não estão"
+  }
+]`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '[]');
+    res.json({ questions: parsed });
+  } catch (err: any) {
+    console.error('Error generating quiz:', err);
+    res.status(500).json({ error: err?.message || 'Falha ao gerar perguntas do quiz' });
   }
 });
 

@@ -1,5 +1,6 @@
 import { ChatMessage } from '../components/VoiceSessionPanel';
 import { CodeSnippetItem } from '../components/CodeWhiteboard';
+import { LearningMode, StudentLevel } from '../types';
 
 export interface VoiceSessionRecord {
   id: string;
@@ -8,7 +9,8 @@ export interface VoiceSessionRecord {
   formattedDate: string; // Readable PT-BR
   durationSeconds: number;
   voiceUsed: string;
-  pedagogicalMode: 'explanatory' | 'socratic';
+  pedagogicalMode: LearningMode;
+  studentLevel?: StudentLevel;
   messages: ChatMessage[];
   codeSnippets: CodeSnippetItem[];
   conceptsDiscussed: string[];

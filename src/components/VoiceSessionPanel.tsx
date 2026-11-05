@@ -13,10 +13,24 @@ import {
   VolumeX,
   History,
   BookmarkCheck,
+  Camera,
+  Upload,
+  FileCode,
+  Download,
+  SearchCode,
+  Briefcase,
+  Bug,
+  Timer,
+  CheckCircle2,
 } from 'lucide-react';
 import { LiveAudioPlayer, LiveAudioRecorder } from '../utils/audio';
 import { CodeSnippetItem } from './CodeWhiteboard';
 import { VoiceSessionRecord, extractConceptsFromText } from '../data/sessionHistory';
+import { LearningMode, StudentLevel } from '../types';
+import { InterviewTimer } from './InterviewTimer';
+import { ImageCaptureModal } from './ImageCaptureModal';
+import { SessionQuizModal } from './SessionQuizModal';
+import { exportSessionToMarkdown } from '../utils/markdownExport';
 
 export interface ChatMessage {
   id: string;
@@ -24,6 +38,7 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   isInterrupted?: boolean;
+  imageThumbnail?: string;
 }
 
 interface VoiceSessionPanelProps {
@@ -35,8 +50,12 @@ interface VoiceSessionPanelProps {
   onClearExternalPrompt: () => void;
   selectedVoice: string;
   setSelectedVoice: (voice: string) => void;
-  pedagogicalMode: 'explanatory' | 'socratic';
-  setPedagogicalMode: (mode: 'explanatory' | 'socratic') => void;
+  pedagogicalMode: LearningMode;
+  setPedagogicalMode: (mode: LearningMode) => void;
+  studentLevel: StudentLevel;
+  setStudentLevel: (level: StudentLevel) => void;
+  onRecordProgress?: (topic: string, result: 'acerto' | 'erro', observation: string) => void;
+  onUploadCodeToWhiteboard?: (code: string, filename: string) => void;
 }
 
 export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
@@ -50,6 +69,10 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
   setSelectedVoice,
   pedagogicalMode,
   setPedagogicalMode,
+  studentLevel,
+  setStudentLevel,
+  onRecordProgress,
+  onUploadCodeToWhiteboard,
 }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -60,6 +83,10 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [textInput, setTextInput] = useState('');
+
+  // Modals state
+  const [isImageModalOpen, setIsImageModalOpen] = useState(false);
+  const [isQuizModalOpen, setIsQuizModalOpen] = useState(false);
 
   const messagesRef = useRef<ChatMessage[]>([]);
   const sessionStartTimeRef = useRef<number | null>(null);
@@ -192,6 +219,7 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
         durationSeconds: duration,
         voiceUsed: selectedVoice,
         pedagogicalMode,
+        studentLevel,
         messages: currentMsgs,
         codeSnippets: [...capturedSnippetsRef.current],
         conceptsDiscussed: concepts,
@@ -249,11 +277,11 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
       await recorder.start();
       recorderRef.current = recorder;
 
-      // 3. Connect WebSocket
+      // 3. Connect WebSocket with voice, mode, and level
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/api/live?voice=${encodeURIComponent(
         selectedVoice
-      )}&mode=${encodeURIComponent(pedagogicalMode)}`;
+      )}&mode=${encodeURIComponent(pedagogicalMode)}&level=${encodeURIComponent(studentLevel)}`;
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -333,6 +361,14 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
               capturedSnippetsRef.current.push(msg.snippet);
               onCodeSnippetReceived(msg.snippet);
             }
+          } else if (msg.type === 'progressUpdate') {
+            if (msg.progress && onRecordProgress) {
+              onRecordProgress(
+                msg.progress.topic,
+                msg.progress.result,
+                msg.progress.observation
+              );
+            }
           } else if (msg.type === 'error') {
             setErrorMessage(msg.error);
           }
@@ -364,9 +400,11 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
     isConnecting,
     selectedVoice,
     pedagogicalMode,
+    studentLevel,
     startVisualizer,
     disconnectSession,
     onCodeSnippetReceived,
+    onRecordProgress,
   ]);
 
   // Handle external prompt click
@@ -409,6 +447,108 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
       onClearExternalPrompt();
     }
   }, [externalSpokenPrompt, isConnected, connectSession, onClearExternalPrompt]);
+
+  // Send Image to Live Session
+  const handleSendImage = (base64Jpeg: string, promptText: string) => {
+    const userMsgText = `[Foto de exercício enviada] ${promptText}`;
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: Math.random().toString(),
+        sender: 'user',
+        text: userMsgText,
+        imageThumbnail: base64Jpeg,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      },
+    ]);
+
+    if (isConnected && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          type: 'image',
+          image: base64Jpeg,
+          mimeType: 'image/jpeg',
+          prompt: promptText,
+        })
+      );
+    } else {
+      // Connect first then send
+      connectSession().then(() => {
+        setTimeout(() => {
+          if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: 'image',
+                image: base64Jpeg,
+                mimeType: 'image/jpeg',
+                prompt: promptText,
+              })
+            );
+          }
+        }, 1200);
+      });
+    }
+  };
+
+  // Upload .java file in chat
+  const handleUploadJavaFileChat = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const code = reader.result as string;
+      if (onUploadCodeToWhiteboard) {
+        onUploadCodeToWhiteboard(code, file.name);
+      }
+
+      const promptText = `Enviei o arquivo Java "${file.name}" para a lousa:\n\n\`\`\`java\n${code}\n\`\`\`\nPor favor, comente e analise por voz.`;
+
+      if (isConnected && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'text', text: promptText }));
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Math.random().toString(),
+          sender: 'user',
+          text: `[Arquivo carregado: ${file.name}]`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // Export current session to Markdown
+  const handleExportSessionMarkdown = () => {
+    const fullText = messages.map((m) => m.text).join(' ');
+    const concepts = extractConceptsFromText(fullText);
+    const title = messages[0]?.text
+      ? messages[0].text.slice(0, 40)
+      : `Sessão sobre ${concepts[0] || 'Java'}`;
+
+    const duration = Math.max(
+      5,
+      Math.round((Date.now() - (sessionStartTimeRef.current || Date.now())) / 1000)
+    );
+    const mins = Math.floor(duration / 60);
+    const secs = duration % 60;
+
+    exportSessionToMarkdown({
+      title,
+      date: new Date().toLocaleDateString('pt-BR'),
+      durationFormatted: `${mins}m ${secs}s`,
+      level: studentLevel,
+      mode: pedagogicalMode,
+      voice: selectedVoice,
+      messages,
+      codeSnippets: capturedSnippetsRef.current,
+    });
+  };
 
   // Toggle mute
   const handleToggleMute = () => {
@@ -495,104 +635,154 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
   };
 
   return (
-    <div className="flex flex-col h-full bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl">
-      {/* Session Top Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 bg-slate-950/80 border-b border-slate-800">
-        <div className="flex items-center gap-3">
-          <div
-            className={`w-3 h-3 rounded-full transition-all duration-300 ${
-              isConnected
-                ? sessionStatus === 'speaking'
-                  ? 'bg-amber-400 ring-4 ring-amber-400/20'
-                  : sessionStatus === 'listening'
-                  ? 'bg-emerald-400 ring-4 ring-emerald-400/20'
-                  : 'bg-emerald-500'
-                : isConnecting
-                ? 'bg-blue-400 animate-pulse'
-                : 'bg-slate-600'
-            }`}
-          />
-          <div>
-            <h3 className="text-sm font-semibold text-white tracking-tight flex items-center gap-2">
-              Gemini 3.8 Live Voice
-              <span className="text-[11px] font-normal text-slate-400">
-                (Áudio 16kHz Entrada / 24kHz Saída)
+    <div className="flex flex-col h-full bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl relative">
+      {/* Session Top Bar: Voice & Controls */}
+      <div className="flex flex-col gap-3 px-6 py-4 bg-slate-950/80 border-b border-slate-800">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div
+              className={`w-3 h-3 rounded-full transition-all duration-300 ${
+                isConnected
+                  ? sessionStatus === 'speaking'
+                    ? 'bg-amber-400 ring-4 ring-amber-400/20'
+                    : sessionStatus === 'listening'
+                    ? 'bg-emerald-400 ring-4 ring-emerald-400/20'
+                    : 'bg-emerald-500'
+                  : isConnecting
+                  ? 'bg-blue-400 animate-pulse'
+                  : 'bg-slate-600'
+              }`}
+            />
+            <div>
+              <h3 className="text-sm font-semibold text-white tracking-tight flex items-center gap-2">
+                Gemini 3.8 Live Voice
+                <span className="text-[11px] font-normal text-slate-400 hidden sm:inline">
+                  (16kHz Mic / 24kHz Voz)
+                </span>
+              </h3>
+              <span className="text-xs text-slate-400">
+                {isConnected
+                  ? sessionStatus === 'speaking'
+                    ? 'Tutor explicando por voz...'
+                    : sessionStatus === 'listening'
+                    ? 'Ouvindo você...'
+                    : 'Conectado · Fale naturalmente ao microfone'
+                  : isConnecting
+                  ? 'Estabelecendo ponte WebSocket...'
+                  : 'Pronto para iniciar sessão'}
               </span>
-            </h3>
-            <span className="text-xs text-slate-400">
-              {isConnected
-                ? sessionStatus === 'speaking'
-                  ? 'Tutor explicando por voz...'
-                  : sessionStatus === 'listening'
-                  ? 'Ouvindo você...'
-                  : 'Conectado · Fale naturalmente ao microfone'
-                : isConnecting
-                ? 'Estabelecendo ponte WebSocket...'
-                : 'Pronto para iniciar'}
-            </span>
+            </div>
+          </div>
+
+          {/* Level and Voice selectors */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Student Level Selector */}
+            <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-xs text-slate-300">
+              <span className="text-slate-500 text-[10px] uppercase font-bold">Nível:</span>
+              <select
+                value={studentLevel}
+                onChange={(e) => setStudentLevel(e.target.value as StudentLevel)}
+                disabled={isConnected}
+                className="bg-transparent text-xs text-amber-300 font-medium focus:outline-none disabled:opacity-50 cursor-pointer"
+              >
+                <option value="iniciante" className="bg-slate-900 text-slate-200">Iniciante (Mais analogias)</option>
+                <option value="intermediário" className="bg-slate-900 text-slate-200">Intermediário (Rigor & Java)</option>
+                <option value="avançado" className="bg-slate-900 text-slate-200">Avançado (JVM & Big-O)</option>
+              </select>
+            </div>
+
+            {/* Voice Picker */}
+            <select
+              value={selectedVoice}
+              onChange={(e) => setSelectedVoice(e.target.value)}
+              disabled={isConnected}
+              className="text-xs bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-slate-200 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+            >
+              <option value="Zephyr">Voz: Zephyr (Calma)</option>
+              <option value="Puck">Voz: Puck (Dinâmica)</option>
+              <option value="Charon">Voz: Charon (Profunda)</option>
+              <option value="Kore">Voz: Kore (Clara)</option>
+              <option value="Fenrir">Voz: Fenrir (Firme)</option>
+              <option value="Aoede">Voz: Aoede (Expressiva)</option>
+            </select>
           </div>
         </div>
 
-        {/* Voice and Mode Options */}
-        <div className="flex items-center gap-2">
-          {/* Pedagogical Mode Switch */}
-          <div className="flex items-center p-0.5 bg-slate-900 border border-slate-800 rounded-lg text-xs">
-            <button
-              onClick={() => setPedagogicalMode('explanatory')}
-              title="Explica com analogias, passo a passo e complexidade"
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-colors ${
-                pedagogicalMode === 'explanatory'
-                  ? 'bg-amber-500 text-slate-950 font-semibold'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <GraduationCap className="w-3.5 h-3.5" />
-              <span>Explicativo</span>
-            </button>
-            <button
-              onClick={() => setPedagogicalMode('socratic')}
-              title="Dá dicas e perguntas guiadas para você pensar sozinho"
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-md transition-colors ${
-                pedagogicalMode === 'socratic'
-                  ? 'bg-amber-500 text-slate-950 font-semibold'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Brain className="w-3.5 h-3.5" />
-              <span>Socrático</span>
-            </button>
-          </div>
-
-          {/* Voice Picker */}
-          <select
-            value={selectedVoice}
-            onChange={(e) => setSelectedVoice(e.target.value)}
-            disabled={isConnected}
-            className="text-xs bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-slate-200 focus:outline-none focus:border-amber-500 disabled:opacity-50"
-          >
-            <option value="Zephyr">Voz: Zephyr (Calma)</option>
-            <option value="Puck">Voz: Puck (Dinâmica)</option>
-            <option value="Charon">Voz: Charon (Profunda)</option>
-            <option value="Kore">Voz: Kore (Clara)</option>
-            <option value="Fenrir">Voz: Fenrir (Firme)</option>
-            <option value="Aoede">Voz: Aoede (Expressiva)</option>
-          </select>
+        {/* 5 Modes Selector Strip */}
+        <div className="flex items-center gap-1.5 p-1 bg-slate-900/90 border border-slate-800/80 rounded-xl overflow-x-auto text-xs">
+          {[
+            { id: 'explanatory', label: 'Explicativo', icon: GraduationCap, tip: 'Analogias, passo a passo e complexidade' },
+            { id: 'socratic', label: 'Socrático', icon: Brain, tip: 'Dicas e perguntas guiadas' },
+            { id: 'review', label: 'Revisão de Código', icon: SearchCode, tip: '2 a 3 pontos de complexidade e desafio' },
+            { id: 'interview', label: 'Simulado de Entrevista', icon: Briefcase, tip: '15 min de prova com avaliação final' },
+            { id: 'debug', label: 'Debug & Stack Trace', icon: Bug, tip: 'Diagnóstico passo a passo de erros' },
+          ].map((m) => {
+            const Icon = m.icon;
+            const isSelected = pedagogicalMode === m.id;
+            return (
+              <button
+                key={m.id}
+                onClick={() => setPedagogicalMode(m.id as LearningMode)}
+                title={m.tip}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors font-medium ${
+                  isSelected
+                    ? 'bg-amber-400 text-slate-950 font-bold shadow-sm'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{m.label}</span>
+              </button>
+            );
+          })}
         </div>
+
+        {/* If Interview Mode: Show 15-Minute Technical Interview Timer */}
+        {pedagogicalMode === 'interview' && (
+          <InterviewTimer
+            initialMinutes={15}
+            onTimeExpired={() => {
+              if (isConnected && wsRef.current) {
+                wsRef.current.send(
+                  JSON.stringify({
+                    type: 'text',
+                    text: 'O tempo de 15 minutos do simulado de entrevista acabou. Por favor, faça a avaliação completa do meu desempenho.',
+                  })
+                );
+              }
+            }}
+            onSubmitSolution={() => {
+              const prompt = 'Terminei minha resolução do problema da entrevista. Por favor, faça a avaliação completa de corretude, complexidade, clareza e comunicação, com nota de 0 a 100 e pontos de melhoria.';
+              if (isConnected && wsRef.current) {
+                wsRef.current.send(JSON.stringify({ type: 'text', text: prompt }));
+              }
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: Math.random().toString(),
+                  sender: 'user',
+                  text: '[Solução da Entrevista Entregue para Avaliação]',
+                  timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                },
+              ]);
+            }}
+          />
+        )}
       </div>
 
       {/* Visual Waveform Canvas */}
-      <div className="relative h-20 bg-slate-950/90 border-b border-slate-800 flex items-center justify-center">
+      <div className="relative h-16 bg-slate-950/90 border-b border-slate-800 flex items-center justify-center">
         <canvas
           ref={canvasRef}
           width={360}
-          height={64}
-          className="w-full max-w-md h-16"
+          height={56}
+          className="w-full max-w-md h-14"
         />
         {!isConnected && (
           <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs">
             <span className="text-xs text-slate-400 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              Inicie a conversa ao vivo para ativar a visualização de voz em tempo real
+              Inicie a conversa para ativar a voz em tempo real
             </span>
           </div>
         )}
@@ -612,18 +802,18 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
       )}
 
       {/* Live Transcript Stream */}
-      <div className="flex-1 p-6 overflow-y-auto space-y-4 min-h-[300px] max-h-[460px]">
+      <div className="flex-1 p-6 overflow-y-auto space-y-4 min-h-[300px] max-h-[440px]">
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-10">
             <div className="w-12 h-12 rounded-full bg-slate-800/80 border border-slate-700/60 flex items-center justify-center mb-3 text-amber-400">
               <Mic className="w-6 h-6" />
             </div>
             <h4 className="text-sm font-semibold text-slate-200 mb-1">
-              Pronto para conversar sobre Java e Algoritmos
+              Pronto para conversar sobre Java no modo{' '}
+              <span className="text-amber-400 capitalize">{pedagogicalMode}</span>
             </h4>
             <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-              Clique em &ldquo;Iniciar Conversa por Voz&rdquo; abaixo e pergunte qualquer coisa:
-              ordenação, busca, recursão, tabelas hash, filas de prioridade ou exercícios de prova.
+              Você pode falar no microfone, enviar uma foto de um exercício do caderno, carregar um arquivo <code className="text-amber-300 font-mono">.java</code> ou colar código na lousa.
             </p>
           </div>
         ) : (
@@ -646,6 +836,17 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
                   </span>
                 )}
               </div>
+
+              {m.imageThumbnail && (
+                <div className="mb-2 max-w-[200px] rounded-xl overflow-hidden border border-slate-700">
+                  <img
+                    src={`data:image/jpeg;base64,${m.imageThumbnail}`}
+                    alt="Exercício enviado"
+                    className="w-full h-auto object-cover"
+                  />
+                </div>
+              )}
+
               <div
                 className={`max-w-[85%] rounded-2xl px-4 py-3 text-xs sm:text-sm leading-relaxed ${
                   m.sender === 'user'
@@ -661,9 +862,9 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Bottom Voice Controls & Quick Actions */}
+      {/* Bottom Voice Controls & Multimodal Inputs */}
       <div className="p-4 bg-slate-950/90 border-t border-slate-800 flex flex-col gap-3">
-        {/* Main Voice Action Bar */}
+        {/* Main Action Bar */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             {!isConnected ? (
@@ -707,53 +908,51 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
                 </button>
               </>
             )}
+
+            {/* End with Quiz Button */}
+            <button
+              onClick={() => setIsQuizModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-500/30 rounded-xl transition-colors"
+              title="Gerar quiz de fixação de 3 a 5 perguntas sobre o que foi discutido"
+            >
+              <HelpCircle className="w-4 h-4 text-amber-400" />
+              <span>Encerrar com Quiz</span>
+            </button>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            {messages.length > 0 && onSessionFinished && (
-              <button
-                type="button"
-                onClick={() => {
-                  const currentMsgs = [...messagesRef.current];
-                  const duration = Math.max(
-                    5,
-                    Math.round((Date.now() - (sessionStartTimeRef.current || Date.now())) / 1000)
-                  );
-                  const fullText = currentMsgs.map((m) => m.text).join(' ');
-                  const concepts = extractConceptsFromText(fullText);
-                  const firstUserMsg = currentMsgs.find((m) => m.sender === 'user')?.text || '';
-                  const title = firstUserMsg
-                    ? firstUserMsg.slice(0, 48) + (firstUserMsg.length > 48 ? '...' : '')
-                    : `Sessão sobre ${concepts[0] || 'Java & Algoritmos'}`;
-                  const firstTutorMsg =
-                    currentMsgs.find((m) => m.sender === 'tutor')?.text ||
-                    'Discussão sobre Java e estruturas de dados.';
-                  const summary =
-                    firstTutorMsg.slice(0, 160) + (firstTutorMsg.length > 160 ? '...' : '');
+          {/* Multimodal input shortcuts (Camera & File) */}
+          <div className="flex items-center gap-2">
+            {/* Camera / Photo Button */}
+            <button
+              onClick={() => setIsImageModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 rounded-xl transition-colors"
+              title="Tirar foto ou enviar imagem de exercício do caderno"
+            >
+              <Camera className="w-4 h-4 text-amber-400" />
+              <span className="hidden sm:inline">Foto do Caderno</span>
+            </button>
 
-                  const record: VoiceSessionRecord = {
-                    id: `session-${Date.now()}`,
-                    title,
-                    date: new Date().toISOString(),
-                    formattedDate: `Hoje às ${new Date().toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}`,
-                    durationSeconds: duration,
-                    voiceUsed: selectedVoice,
-                    pedagogicalMode,
-                    messages: currentMsgs,
-                    codeSnippets: [...capturedSnippetsRef.current],
-                    conceptsDiscussed: concepts,
-                    summary,
-                  };
-                  onSessionFinished(record);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 rounded-xl transition-colors"
-                title="Salvar transcrição desta conversa no histórico"
+            {/* Upload .java */}
+            <label className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 rounded-xl cursor-pointer transition-colors" title="Carregar arquivo .java">
+              <Upload className="w-4 h-4 text-amber-400" />
+              <span className="hidden sm:inline">Upload .java</span>
+              <input
+                type="file"
+                accept=".java,text/plain"
+                onChange={handleUploadJavaFileChat}
+                className="hidden"
+              />
+            </label>
+
+            {/* Export Markdown */}
+            {messages.length > 0 && (
+              <button
+                onClick={handleExportSessionMarkdown}
+                className="flex items-center gap-1 px-2.5 py-2 text-xs font-medium bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 rounded-xl transition-colors"
+                title="Exportar sessão atual em Markdown (.md)"
               >
-                <BookmarkCheck className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Salvar Sessão</span>
+                <Download className="w-4 h-4 text-blue-400" />
+                <span className="hidden md:inline">Exportar .md</span>
               </button>
             )}
 
@@ -761,17 +960,12 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
               <button
                 type="button"
                 onClick={onOpenHistory}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-xl transition-colors"
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-xl transition-colors"
               >
-                <History className="w-3.5 h-3.5 text-amber-400" />
+                <History className="w-4 h-4 text-amber-400" />
                 <span>Histórico ({savedSessionCount})</span>
               </button>
             )}
-
-            <div className="text-[11px] text-slate-400 hidden sm:flex items-center gap-1">
-              <span>Modelo:</span>
-              <span className="font-mono text-amber-400">gemini-3.8-live</span>
-            </div>
           </div>
         </div>
 
@@ -781,18 +975,39 @@ export const VoiceSessionPanel: React.FC<VoiceSessionPanelProps> = ({
             type="text"
             value={textInput}
             onChange={(e) => setTextInput(e.target.value)}
-            placeholder="Ou digite sua dúvida / cole o enunciado de um exercício aqui..."
-            className="flex-1 px-4 py-2 text-xs bg-slate-900 border border-slate-800 rounded-xl text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
+            placeholder="Digite sua dúvida, cole um stack trace ou enunciado..."
+            className="flex-1 px-4 py-2.5 text-xs bg-slate-900 border border-slate-800 rounded-xl text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors"
           />
           <button
             type="submit"
-            className="px-4 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 transition-colors flex items-center gap-1"
+            className="px-4 py-2.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl border border-slate-700 transition-colors flex items-center gap-1"
           >
             <Send className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Enviar</span>
           </button>
         </form>
       </div>
+
+      {/* Image Capture / Upload Modal */}
+      <ImageCaptureModal
+        isOpen={isImageModalOpen}
+        onClose={() => setIsImageModalOpen(false)}
+        onSendImage={handleSendImage}
+      />
+
+      {/* Session Quiz Modal */}
+      <SessionQuizModal
+        isOpen={isQuizModalOpen}
+        onClose={() => setIsQuizModalOpen(false)}
+        sessionTranscript={messages.map((m) => `${m.sender}: ${m.text}`).join('\n')}
+        sessionTopics={extractConceptsFromText(messages.map((m) => m.text).join(' '))}
+        studentLevel={studentLevel}
+        onRecordProgress={(topic, result, obs) => {
+          if (onRecordProgress) {
+            onRecordProgress(topic, result, obs);
+          }
+        }}
+      />
     </div>
   );
 };

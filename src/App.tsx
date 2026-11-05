@@ -7,8 +7,21 @@ import { AlgorithmVisualizer } from './components/AlgorithmVisualizer';
 import { CollectionsGuide } from './components/CollectionsGuide';
 import { VoiceSessionPanel } from './components/VoiceSessionPanel';
 import { SessionHistoryPanel } from './components/SessionHistoryPanel';
+import { SnippetLibrary } from './components/SnippetLibrary';
+import { ProgressPanel } from './components/ProgressPanel';
 import { ALGORITHM_PRESETS, AlgorithmPreset } from './data/javaTopics';
 import { VoiceSessionRecord, INITIAL_SEED_SESSIONS } from './data/sessionHistory';
+import {
+  INITIAL_TOPICS_PROGRESS,
+  updateTopicProgress,
+  isTopicDueForReview,
+} from './data/progressTopics';
+import {
+  StudentLevel,
+  LearningMode,
+  SavedSnippet,
+  TopicProgress,
+} from './types';
 import {
   Mic,
   Code2,
@@ -19,28 +32,129 @@ import {
   HelpCircle,
   CheckCircle2,
   History,
+  Bookmark,
+  TrendingUp,
+  Flame,
 } from 'lucide-react';
 
-const STORAGE_KEY = 'algoritmia_voice_sessions';
+const SESSIONS_STORAGE_KEY = 'algoritmia_voice_sessions';
+const SNIPPETS_STORAGE_KEY = 'algoritmia_saved_snippets';
+const PROGRESS_STORAGE_KEY = 'algoritmia_topics_progress';
+const LEVEL_STORAGE_KEY = 'algoritmia_student_level';
+
+const SEED_SNIPPETS: SavedSnippet[] = [
+  {
+    id: 'seed-bs',
+    title: 'Busca Binária sem Risco de Overflow',
+    code: `public class SafeBinarySearch {
+    public static int binarySearch(int[] arr, int target) {
+        int left = 0;
+        int right = arr.length - 1;
+        while (left <= right) {
+            // Previne overflow de inteiro em comparação com (left + right) / 2
+            int mid = left + (right - left) / 2;
+            if (arr[mid] == target) return mid;
+            if (arr[mid] < target) left = mid + 1;
+            else right = mid - 1;
+        }
+        return -1;
+    }
+}`,
+    explanation: 'Usa cálculo seguro de mid em O(log n) evitando overflow em arrays gigantes.',
+    complexityTime: 'O(log n)',
+    complexitySpace: 'O(1)',
+    javaStandardClass: 'java.util.Arrays.binarySearch()',
+    date: new Date().toISOString(),
+    formattedDate: '05 de nov',
+    tags: ['Busca', 'O(log n)', 'Arrays', 'Fundamentos'],
+  },
+  {
+    id: 'seed-deque',
+    title: 'Stack Idiomática com ArrayDeque em Java',
+    code: `import java.util.ArrayDeque;
+import java.util.Deque;
+
+public class IdiomaticStack {
+    public static void main(String[] args) {
+        Deque<String> stack = new ArrayDeque<>();
+        stack.push("primeiro");
+        stack.push("segundo");
+        while (!stack.isEmpty()) {
+            System.out.println(stack.pop());
+        }
+    }
+}`,
+    explanation: 'Usa ArrayDeque que supera java.util.Stack por não sofrer locks de sincronização.',
+    complexityTime: 'O(1) amortizado',
+    complexitySpace: 'O(n)',
+    javaStandardClass: 'java.util.ArrayDeque<E>',
+    date: new Date().toISOString(),
+    formattedDate: '05 de nov',
+    tags: ['Pilhas', 'ArrayDeque', 'O(1)', 'Java Collections'],
+  },
+];
 
 function loadSavedSessions(): VoiceSessionRecord[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(SESSIONS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
-      }
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
     }
   } catch (e) {
-    console.error('Failed to parse saved sessions from localStorage:', e);
+    console.error('Failed to load saved sessions:', e);
   }
   return INITIAL_SEED_SESSIONS;
 }
 
+function loadSavedSnippets(): SavedSnippet[] {
+  try {
+    const raw = localStorage.getItem(SNIPPETS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.error('Failed to load saved snippets:', e);
+  }
+  return SEED_SNIPPETS;
+}
+
+function loadSavedProgress(): TopicProgress[] {
+  try {
+    const raw = localStorage.getItem(PROGRESS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.error('Failed to load saved progress:', e);
+  }
+  return INITIAL_TOPICS_PROGRESS;
+}
+
+function loadSavedLevel(): StudentLevel {
+  try {
+    const raw = localStorage.getItem(LEVEL_STORAGE_KEY);
+    if (raw === 'iniciante' || raw === 'intermediário' || raw === 'avançado') {
+      return raw;
+    }
+  } catch (e) {}
+  return 'iniciante';
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'voice' | 'whiteboard' | 'visualizer' | 'collections' | 'history'>('voice');
+  const [activeTab, setActiveTab] = useState<
+    'voice' | 'whiteboard' | 'visualizer' | 'collections' | 'snippets' | 'progress' | 'history'
+  >('voice');
+
   const [sessions, setSessions] = useState<VoiceSessionRecord[]>(loadSavedSessions);
+  const [savedSnippets, setSavedSnippets] = useState<SavedSnippet[]>(loadSavedSnippets);
+  const [topicsProgress, setTopicsProgress] = useState<TopicProgress[]>(loadSavedProgress);
+  const [studentLevel, setStudentLevel] = useState<StudentLevel>(loadSavedLevel);
+  const [pedagogicalMode, setPedagogicalMode] = useState<LearningMode>('explanatory');
+  const [selectedVoice, setSelectedVoice] = useState<string>('Zephyr');
+
   const [currentSnippet, setCurrentSnippet] = useState<CodeSnippetItem | null>({
     id: 'default-bs',
     title: 'Busca Binária (Binary Search) em Java',
@@ -50,9 +164,16 @@ export default function App() {
     complexitySpace: 'O(1)',
     javaStandardClass: 'java.util.Arrays.binarySearch()',
   });
+
   const [externalSpokenPrompt, setExternalSpokenPrompt] = useState<string | null>(null);
-  const [selectedVoice, setSelectedVoice] = useState<string>('Zephyr');
-  const [pedagogicalMode, setPedagogicalMode] = useState<'explanatory' | 'socratic'>('explanatory');
+
+  // Sync level to localStorage
+  const handleSetStudentLevel = (level: StudentLevel) => {
+    setStudentLevel(level);
+    try {
+      localStorage.setItem(LEVEL_STORAGE_KEY, level);
+    } catch (e) {}
+  };
 
   const handleAskTutor = (prompt: string) => {
     setExternalSpokenPrompt(prompt);
@@ -87,7 +208,7 @@ export default function App() {
         updated = [newSession, ...prev];
       }
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+        localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(updated));
       } catch (e) {
         console.error(e);
       }
@@ -99,10 +220,8 @@ export default function App() {
     setSessions((prev) => {
       const updated = prev.filter((s) => s.id !== sessionId);
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      } catch (e) {
-        console.error(e);
-      }
+        localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(updated));
+      } catch (e) {}
       return updated;
     });
   };
@@ -110,11 +229,100 @@ export default function App() {
   const handleClearAllSessions = () => {
     setSessions([]);
     try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch (e) {
-      console.error(e);
-    }
+      localStorage.removeItem(SESSIONS_STORAGE_KEY);
+    } catch (e) {}
   };
+
+  // Snippet Library Handlers
+  const handleSaveToLibrary = (snippet: CodeSnippetItem, tags: string[]) => {
+    const newSaved: SavedSnippet = {
+      id: `snippet-${Date.now()}`,
+      title: snippet.title,
+      code: snippet.code,
+      explanation: snippet.explanation,
+      complexityTime: snippet.complexityTime,
+      complexitySpace: snippet.complexitySpace,
+      javaStandardClass: snippet.javaStandardClass || 'Personalizada',
+      date: new Date().toISOString(),
+      formattedDate: new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }),
+      tags: tags.length > 0 ? tags : ['Java'],
+    };
+
+    setSavedSnippets((prev) => {
+      const updated = [newSaved, ...prev.filter((s) => s.title !== newSaved.title)];
+      try {
+        localStorage.setItem(SNIPPETS_STORAGE_KEY, JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
+  };
+
+  const handleDeleteSnippet = (snippetId: string) => {
+    setSavedSnippets((prev) => {
+      const updated = prev.filter((s) => s.id !== snippetId);
+      try {
+        localStorage.setItem(SNIPPETS_STORAGE_KEY, JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
+  };
+
+  const handleOpenSnippetOnWhiteboard = (snippet: SavedSnippet) => {
+    setCurrentSnippet({
+      id: snippet.id,
+      title: snippet.title,
+      code: snippet.code,
+      explanation: snippet.explanation,
+      complexityTime: snippet.complexityTime,
+      complexitySpace: snippet.complexitySpace,
+      javaStandardClass: snippet.javaStandardClass,
+    });
+    setActiveTab('whiteboard');
+  };
+
+  // Progress Handlers
+  const handleRecordProgress = (topic: string, result: 'acerto' | 'erro', observation: string) => {
+    setTopicsProgress((prev) => {
+      const updated = updateTopicProgress(prev, topic, result, observation);
+      try {
+        localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(updated));
+      } catch (e) {}
+      return updated;
+    });
+  };
+
+  const handleResetProgress = () => {
+    setTopicsProgress(INITIAL_TOPICS_PROGRESS);
+    try {
+      localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(INITIAL_TOPICS_PROGRESS));
+    } catch (e) {}
+  };
+
+  // Upload .java file from chat or whiteboard
+  const handleUploadCodeToWhiteboard = (code: string, filename: string) => {
+    setCurrentSnippet({
+      id: `upload-${Date.now()}`,
+      title: filename || 'Código Java Enviado',
+      code,
+      explanation: `Arquivo de código "${filename}" carregado pelo aluno.`,
+      complexityTime: 'A analisar pelo tutor',
+      complexitySpace: 'A analisar pelo tutor',
+      javaStandardClass: 'Código do Aluno',
+    });
+    setActiveTab('whiteboard');
+  };
+
+  // Send code from Whiteboard editor to voice tutor
+  const handleSendCodeFromWhiteboard = (code: string, isReview: boolean) => {
+    const prompt = isReview
+      ? `Por favor, faça uma revisão de código deste trecho Java que editei na lousa, apontando os 2 a 3 principais problemas de complexidade e legibilidade sem me dar a resposta pronta, e proponha um desafio:\n\n\`\`\`java\n${code}\n\`\`\``
+      : `Aqui está o código Java atualizado que editei na lousa:\n\n\`\`\`java\n${code}\n\`\`\`\nPor favor, comente por voz o que achou da implementação e da complexidade.`;
+
+    setExternalSpokenPrompt(prompt);
+    setActiveTab('voice');
+  };
+
+  const dueForReviewCount = topicsProgress.filter(isTopicDueForReview).length;
 
   return (
     <div className="min-h-screen bg-[#0a0e17] text-slate-100 flex flex-col selection:bg-amber-500/30 selection:text-amber-200">
@@ -131,14 +339,14 @@ export default function App() {
         </a>
 
         {/* Zone 2: Navigation Links (single line, clean hover) */}
-        <nav className="hidden md:flex items-center gap-6 text-xs font-medium text-slate-400">
+        <nav className="hidden lg:flex items-center gap-5 text-xs font-medium text-slate-400">
           <button
             onClick={() => setActiveTab('voice')}
             className={`transition-colors whitespace-nowrap shrink-0 ${
               activeTab === 'voice' ? 'text-amber-300 font-semibold' : 'hover:text-slate-200'
             }`}
           >
-            Sessão de Voz ao Vivo
+            Sessão de Voz
           </button>
           <button
             onClick={() => setActiveTab('whiteboard')}
@@ -154,7 +362,7 @@ export default function App() {
               activeTab === 'visualizer' ? 'text-amber-300 font-semibold' : 'hover:text-slate-200'
             }`}
           >
-            Visualizador Interativo
+            Visualizador
           </button>
           <button
             onClick={() => setActiveTab('collections')}
@@ -162,17 +370,43 @@ export default function App() {
               activeTab === 'collections' ? 'text-amber-300 font-semibold' : 'hover:text-slate-200'
             }`}
           >
-            Java Collections
+            Coleções
+          </button>
+          <button
+            onClick={() => setActiveTab('snippets')}
+            className={`transition-colors whitespace-nowrap shrink-0 flex items-center gap-1 ${
+              activeTab === 'snippets' ? 'text-amber-300 font-semibold' : 'hover:text-slate-200'
+            }`}
+          >
+            <Bookmark className="w-3.5 h-3.5 text-amber-400" />
+            <span>Biblioteca</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">
+              {savedSnippets.length}
+            </span>
+          </button>
+          <button
+            onClick={() => setActiveTab('progress')}
+            className={`transition-colors whitespace-nowrap shrink-0 flex items-center gap-1 ${
+              activeTab === 'progress' ? 'text-amber-300 font-semibold' : 'hover:text-slate-200'
+            }`}
+          >
+            <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Progresso</span>
+            {dueForReviewCount > 0 && (
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono">
+                {dueForReviewCount} hoje
+              </span>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('history')}
-            className={`transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+            className={`transition-colors whitespace-nowrap shrink-0 flex items-center gap-1 ${
               activeTab === 'history' ? 'text-amber-300 font-semibold' : 'hover:text-slate-200'
             }`}
           >
-            <History className="w-3.5 h-3.5 text-amber-400" />
-            <span>Histórico de Sessões</span>
-            <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">
+            <History className="w-3.5 h-3.5 text-blue-400" />
+            <span>Histórico</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 font-mono">
               {sessions.length}
             </span>
           </button>
@@ -196,14 +430,13 @@ export default function App() {
           <div className="max-w-2xl">
             <div className="flex items-center gap-2 text-xs text-amber-400/90 font-medium mb-2">
               <Sparkles className="w-3.5 h-3.5" />
-              <span>Gemini 3.8 Live API · Voz Bidirecional em Baixa Latência</span>
+              <span>Gemini 3.8 Live API · 5 Modos de Ensino · Revisão Espaçada</span>
             </div>
             <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold tracking-tight text-white text-balance">
               Seu tutor sênior de Java, algoritmos e estruturas de dados por voz.
             </h1>
             <p className="mt-2 text-xs sm:text-sm text-slate-400 leading-relaxed">
-              Converse em tempo real como se estivesse diante da lousa de uma sala de estudos.
-              Comece pela intuição com analogias cotidianas, veja exemplos pequenos, compreenda a complexidade e veja a lousa de código atualizar automaticamente.
+              Pratique por voz com analogias do dia a dia, faça code reviews, simule entrevistas técnicas de 15 minutos com cronômetro, debuge stack traces e acompanhe sua retenção com repetição espaçada.
             </p>
           </div>
 
@@ -214,8 +447,8 @@ export default function App() {
               {[
                 'Explique QuickSort com analogia',
                 'Diferença de HashMap e TreeMap',
-                'Por que ArrayDeque substitui Stack?',
-                'Quando usar busca binária?',
+                'Quero fazer um simulado de entrevista',
+                'Faça code review do meu código',
               ].map((promptText) => (
                 <button
                   key={promptText}
@@ -231,12 +464,14 @@ export default function App() {
       </section>
 
       {/* Interactive Workspace Navigation Tabs for Mobile / Compact */}
-      <div className="md:hidden px-6 pt-4 flex items-center gap-2 overflow-x-auto pb-2 border-b border-slate-800">
+      <div className="lg:hidden px-6 pt-4 flex items-center gap-2 overflow-x-auto pb-2 border-b border-slate-800">
         {[
           { key: 'voice', label: 'Voz ao Vivo' },
           { key: 'whiteboard', label: 'Lousa' },
           { key: 'visualizer', label: 'Visualizador' },
           { key: 'collections', label: 'Coleções' },
+          { key: 'snippets', label: `Snippets (${savedSnippets.length})` },
+          { key: 'progress', label: `Progresso ${dueForReviewCount > 0 ? `(${dueForReviewCount})` : ''}` },
           { key: 'history', label: `Histórico (${sessions.length})` },
         ].map((t) => (
           <button
@@ -253,7 +488,7 @@ export default function App() {
         ))}
       </div>
 
-      {/* Main Dual-Column Workspace */}
+      {/* Main Workspace Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-6 lg:p-12">
         {activeTab === 'history' ? (
           <SessionHistoryPanel
@@ -267,6 +502,20 @@ export default function App() {
             }}
             onDeleteSession={handleDeleteSession}
             onClearAllSessions={handleClearAllSessions}
+          />
+        ) : activeTab === 'snippets' ? (
+          <SnippetLibrary
+            snippets={savedSnippets}
+            onOpenSnippetOnWhiteboard={handleOpenSnippetOnWhiteboard}
+            onDeleteSnippet={handleDeleteSnippet}
+          />
+        ) : activeTab === 'progress' ? (
+          <ProgressPanel
+            topics={topicsProgress}
+            onStartTopicSession={(topicName) => {
+              handleAskTutor(`Gostaria de praticar o tópico de ${topicName} hoje, revisando meus pontos de dúvida.`);
+            }}
+            onResetProgress={handleResetProgress}
           />
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
@@ -283,6 +532,10 @@ export default function App() {
                 setSelectedVoice={setSelectedVoice}
                 pedagogicalMode={pedagogicalMode}
                 setPedagogicalMode={setPedagogicalMode}
+                studentLevel={studentLevel}
+                setStudentLevel={handleSetStudentLevel}
+                onRecordProgress={handleRecordProgress}
+                onUploadCodeToWhiteboard={handleUploadCodeToWhiteboard}
               />
 
               {/* Quick Algorithm Carousel below Voice */}
@@ -368,11 +621,11 @@ export default function App() {
                   <span>Coleções</span>
                 </button>
                 <button
-                  onClick={() => setActiveTab('history')}
+                  onClick={() => setActiveTab('snippets')}
                   className="flex-1 py-2 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 text-slate-400 hover:text-white"
                 >
-                  <History className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Histórico</span>
+                  <Bookmark className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Snippets</span>
                 </button>
               </div>
 
@@ -384,6 +637,11 @@ export default function App() {
                     const preset = ALGORITHM_PRESETS.find((p) => p.id === id);
                     if (preset) handleSendCodeToWhiteboard(preset);
                   }}
+                  onSaveToLibrary={handleSaveToLibrary}
+                  onSendCodeToTutor={handleSendCodeFromWhiteboard}
+                  onUploadJavaFile={handleUploadCodeToWhiteboard}
+                  learningMode={pedagogicalMode}
+                  isSavedInLibrary={savedSnippets.some((s) => s.title === currentSnippet?.title)}
                 />
               ) : null}
 
@@ -401,17 +659,29 @@ export default function App() {
               {/* Pedagogical Guideline Card for Student */}
               <div className="p-4 bg-slate-900/40 border border-slate-800 rounded-xl text-xs text-slate-400 space-y-2">
                 <span className="font-semibold text-slate-300 block text-xs">
-                  Como aproveitar seu tutor ao máximo:
+                  Dicas do modo ativo ({pedagogicalMode}):
                 </span>
-                <p className="leading-relaxed">
-                  1. <strong>Interrompa a qualquer momento:</strong> Se você não entendeu uma analogia, basta falar ou clicar no botão &ldquo;Interromper&rdquo;.
-                </p>
-                <p className="leading-relaxed">
-                  2. <strong>Peça dicas em vez da resposta:</strong> No &ldquo;Modo Socrático&rdquo;, ele fará perguntas orientadas para que você chegue à solução por si próprio.
-                </p>
-                <p className="leading-relaxed">
-                  3. <strong>Peça código na lousa:</strong> Diga &ldquo;coloque a implementação de QuickSort na lousa&rdquo; para vê-la aparecer ao lado.
-                </p>
+                {pedagogicalMode === 'review' ? (
+                  <p className="leading-relaxed">
+                    Edite ou envie seu código na lousa ao lado e clique em &ldquo;Solicitar Code Review&rdquo;. O tutor apontará até 3 gargalos de complexidade e legibilidade para você refatorar.
+                  </p>
+                ) : pedagogicalMode === 'interview' ? (
+                  <p className="leading-relaxed">
+                    Você tem 15 minutos para formular sua solução. O tutor responderá somente a dúvidas de enunciado. Ao final, entregue para receber uma avaliação com nota e pontos de melhoria.
+                  </p>
+                ) : pedagogicalMode === 'debug' ? (
+                  <p className="leading-relaxed">
+                    Cole o stack trace ou descreva o erro inesperado. O tutor fará perguntas diagnósticas para guiar você até a causa raiz sem entregar o spoiler.
+                  </p>
+                ) : pedagogicalMode === 'socratic' ? (
+                  <p className="leading-relaxed">
+                    O tutor responderá com perguntas reflexivas e pistas conceituais para que você deduza o algoritmo por conta própria.
+                  </p>
+                ) : (
+                  <p className="leading-relaxed">
+                    O tutor começará com uma analogia do dia a dia, mostrará o passo a passo com poucos elementos e explicará a complexidade assintótica em Java.
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -424,6 +694,8 @@ export default function App() {
           <span>Algoritmia · Tutor de Java por Voz</span>
           <span aria-hidden="true">·</span>
           <span>Gemini 3.8 Live API</span>
+          <span aria-hidden="true">·</span>
+          <span className="capitalize">Nível: {studentLevel}</span>
         </div>
         <div className="flex items-center gap-4">
           <span>Áudio: 16kHz PCM (mic) / 24kHz PCM (fala)</span>
